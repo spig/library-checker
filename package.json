@@ -1,0 +1,17 @@
+{
+  "name": "slcolibrary-node-request",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "async": "^2.0.1",
+    "async-waterfall": "^0.1.5",
+    "cheerio": "^0.22.0",
+    "request": "^2.75.0"
+  }
+}
