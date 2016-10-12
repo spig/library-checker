@@ -8,6 +8,15 @@ var async = require('async');
 var filename = process.argv[2];
 var pin = process.argv[3];
 
+function getStandardKey(key) {
+    if (key.search(/branch/i) !== -1) { return 'library'; }
+    else if (key.search(/callnumber/i) !== -1) { return 'callnumber'; }
+    else if (key.search(/title/i) !== -1) { return 'title'; }
+    else if (key.search(/due/i) !== -1) { return 'due'; }
+    else if (key.search(/renewals/i) !== -1) { return 'renewals'; }
+    else { return key; }
+}
+
 function checkCard(cardNumber) {
     return function(callback) {
         var jar = request.jar();
@@ -65,7 +74,7 @@ function checkCard(cardNumber) {
                 items.each(function() {
                     var coItem = {};
                     $(this).find($('span[id^="GridView"]')).each(function() {
-                        coItem[$(this).attr('id')] = $(this).text();
+                        coItem[getStandardKey($(this).attr('id'))] = $(this).text();
                     });
                     checkedOutItems.push(coItem);
                 });
@@ -99,7 +108,27 @@ lineReader.on('close', function() {
                 return console.log('error: ' + err);
             }
 
-            console.log(results);
+            // flatten array of results
+            [].concat.apply([], results)
+
+            // remove items that are from Virtual Library - can't be late
+            .filter(function (item) {
+                if (item.library) {
+                    return item.library.search(/virtual/i) === -1;
+                }
+
+                // else keep this item
+                return true;
+            })
+
+            // print matching items
+            .map(function(item) {
+                console.log(item);
+            });
+
+            // TODO: filter out items that are due
+            // TODO: idea - log all items checked out to a database, write another script to query database for those that are coming due, write another script to do auto-renewals
+            // TODO: script to check for items that are available
         }
     );
 });
