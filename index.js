@@ -19,7 +19,6 @@ function checkCard(cardNumber) {
                         jar: jar
                     },
                     function (err, httpResponse, body) {
-                        //console.log(httpResponse);
                         cb(null, body);
                     }
                 );
@@ -69,17 +68,12 @@ function checkCard(cardNumber) {
                         coItem[$(this).attr('id')] = $(this).text();
                     });
                     checkedOutItems.push(coItem);
-                    //GridView1_labelTitle_0
                 });
-        //        console.log('items out: ' + $('#GridView1').find($('tr.patrongrid-row')).length);
-         //       $('#GridView1').each(function(index, element) {
-        //            console.log($(this).html());
-        //        });
                 cb(null, checkedOutItems);
             }
         ], function(err, result) {
             if (err) {
-                callback(err);
+                return callback(err);
             }
 
             callback(null, result);
@@ -91,15 +85,21 @@ var lineReader = require('readline').createInterface({
       input: require('fs').createReadStream(filename)
 });
 
+var cardCheckFunctions = [];
 lineReader.on('line', function (line) {
     console.log('checking librarycard number: ', line);
-    async.parallel([
-        checkCard(line)
-    ], function(err, results) {
-        if (err) {
-            return console.log('error: ' + err);
-        }
+    cardCheckFunctions.push(checkCard(line));
+});
 
-        console.log(results);
-    });
+lineReader.on('close', function() {
+    async.parallel(
+        cardCheckFunctions,
+        function(err, results) {
+            if (err) {
+                return console.log('error: ' + err);
+            }
+
+            console.log(results);
+        }
+    );
 });
