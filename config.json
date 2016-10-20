@@ -1,0 +1,4 @@
+{
+    "GCLOUD_PROJECT": "library-checker",
+    "DATA_BACKEND": "datastore"
+}

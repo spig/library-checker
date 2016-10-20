@@ -4,9 +4,53 @@ var request = require('request');
 var cheerio = require('cheerio');
 var waterfall = require('async-waterfall');
 var async = require('async');
+//var config = require('./config');
 
 var filename = process.argv[2];
 var pin = process.argv[3];
+
+var DUE_WARNING_DAYS = 2;
+
+/*
+function getModel () {
+  return require('./model-' + config.get('DATA_BACKEND'));
+}
+*/
+
+var itemModel = require('./item-model-datastore');//getModel();
+var holdsModel = require('./holds-model-datastore');
+
+var virtualRegex = /virtual/i;
+
+Date.prototype.addDays = function(days) {
+    var date = new Date(this.valueOf());
+    date.setDate(date.getDate() + days);
+    return date;
+};
+
+function bookIsDue(dueDate) {
+    try {
+        var due = Date.parse(dueDate);
+        var today = (new Date()).setHours(0,0,0,0);// set to beginning of today
+        console.log('is book due: ', (new Date(due - today)).getDate() <= DUE_WARNING_DAYS);
+        return (new Date(due - today)).getDate() <= DUE_WARNING_DAYS;
+    } catch (ex) {
+        console.log(ex);
+        return true;
+    }
+}
+
+/* true if the library is the 'virtual' library */
+function itemIsElectronic(item) {
+    if (item.library) {
+        console.log('item has library and is electronic', item.library.search(virtualRegex) !== -1);
+        return item.library.search(virtualRegex) !== -1;
+    } else {
+        console.log('item has NO library', item);
+        return false;
+    }
+}
+
 
 function getStandardKey(key) {
     if (key.search(/branch/i) !== -1) { return 'library'; }
@@ -20,6 +64,7 @@ function getStandardKey(key) {
 function checkCard(cardNumber) {
     return function(callback) {
         var jar = request.jar();
+        var patronItems = [];
         waterfall([
             function(cb) {
                 request.get(
@@ -51,12 +96,42 @@ function checkCard(cardNumber) {
                         jar: jar,
                         followAllRedirects: true
                     },
-                    function (err, httpResponse, body) {
+                    function () { // (err, httpResponse, body) {
+                        // TODO log httpResponse, body?
+                        cb(null);
+                    }
+                );
+            },
+            function(cb) {
+                request.get(
+                    {
+                        url: 'https://catalog.slcolibrary.org/polaris/patronaccount/requests.aspx',
+                        jar: jar
+                    },
+                    function(err, httpResponse, body) {
                         cb(null, body);
                     }
                 );
             },
-            function(userPage, cb) {
+            function(patronHolds, cb) {
+                var $ = cheerio.load(patronHolds);
+                var items = $('#GridView1').find($('tr.patrongrid-row'));
+                items.each(function() {
+                    var holdItem = {};
+                    $(this).find($('span[id^="GridView"]')).each(function() {
+                        holdItem[getStandardKey($(this).attr('id'))] = $(this).text();
+                    });
+                    $(this).find($('a.requestdetailview')).each(function() {//(idx, a) {
+                        holdItem.reqID = $(this).attr('href').split('ReqID=')[1].match(/\d+/)[0];
+                    });
+                    // add library card number to holdItem
+                    holdItem.patronCardNumber = cardNumber;
+                    holdItem.hold = true;
+                    patronItems.push(holdItem);
+                });
+                cb(null);
+            },
+            function(cb) {
                 request.get(
                     {
                         url: 'https://catalog.slcolibrary.org/polaris/patronaccount/itemsout.aspx',
@@ -67,25 +142,29 @@ function checkCard(cardNumber) {
                     }
                 );
             },
-            function(patronItems, cb) {
-                var $ = cheerio.load(patronItems);
+            function(patronItemPage, cb) {
+                var $ = cheerio.load(patronItemPage);
                 var items = $('#GridView1').find($('tr.patrongrid-row'));
-                var checkedOutItems = [];
                 items.each(function() {
                     var coItem = {};
                     $(this).find($('span[id^="GridView"]')).each(function() {
                         coItem[getStandardKey($(this).attr('id'))] = $(this).text();
                     });
-                    checkedOutItems.push(coItem);
+                    $(this).find($('a.itemdetailview')).each(function() { // (idx, a) {
+                        coItem.recID = $(this).attr('href').split('RecID=')[1].match(/\d+/)[0];
+                    });
+                    // add library card number to coItem
+                    coItem.patronCardNumber = cardNumber;
+                    patronItems.push(coItem);
                 });
-                cb(null, checkedOutItems);
+                cb(null);
             }
-        ], function(err, result) {
+        ], function(err) {
             if (err) {
                 return callback(err);
             }
 
-            callback(null, result);
+            callback(null, patronItems);
         });
     };
 }
@@ -111,6 +190,52 @@ lineReader.on('close', function() {
             // flatten array of results
             [].concat.apply([], results)
 
+            .map(function(item) {
+                // TODO: add the card number to the data logged
+                if (item.due) {
+                    itemModel.create({
+                            'recID': item.recID,
+                            'title': item.title,
+                            'dueDate': Date.parse(item.due),
+                            'isDue': bookIsDue(item.due) && ! itemIsElectronic(item),
+                            'library': item.library,
+                            'card': item.patronCardNumber,
+                            'created': new Date()
+                        },
+                        function(err, savedData) {
+                            if (err) {
+                                console.log('err: ' + err);
+                            }
+
+                            console.log('savedData: ' + JSON.stringify(savedData));
+                        }
+                    );
+                }
+
+                if (item.hold) {
+                    holdsModel.create({
+                            'reqID': item.reqID,
+                            'title': item.title,
+                            /*
+                            'dueDate': Date.parse(item.due),
+                            'isDue': bookIsDue(item.due),
+                            */
+                            'card': item.patronCardNumber,
+                            'created': new Date()
+                        },
+                        function(err, savedData) {
+                            if (err) {
+                                console.log('err: ' + err);
+                            }
+
+                            console.log('savedData: ' + JSON.stringify(savedData));
+                        }
+                    );
+                }
+
+                return item;
+            })
+
             // remove items that are from Virtual Library - can't be late
             .filter(function (item) {
                 if (item.library) {
@@ -121,9 +246,14 @@ lineReader.on('close', function() {
                 return true;
             })
 
+            // only show those items that are due
+            .filter(function (item) {
+                return bookIsDue(item.due);
+            })
+
             // print matching items
             .map(function(item) {
-                console.log(item);
+                console.log(item.title + ' is due ' + item.due);
             });
 
             // TODO: filter out items that are due
