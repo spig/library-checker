@@ -20,7 +20,7 @@ function getModel () {
 var itemModel = require('./item-model-datastore');//getModel();
 var holdsModel = require('./holds-model-datastore');
 
-var virtualRegex = /virtual/i;
+var virtualRegex = /(virtual|online)/i;
 
 Date.prototype.addDays = function(days) {
     var date = new Date(this.valueOf());
@@ -32,7 +32,6 @@ function bookIsDue(dueDate) {
     try {
         var due = Date.parse(dueDate);
         var today = (new Date()).setHours(0,0,0,0);// set to beginning of today
-        console.log('is book due: ', (new Date(due - today)).getDate() <= DUE_WARNING_DAYS);
         return (new Date(due - today)).getDate() <= DUE_WARNING_DAYS;
     } catch (ex) {
         console.log(ex);
@@ -43,22 +42,22 @@ function bookIsDue(dueDate) {
 /* true if the library is the 'virtual' library */
 function itemIsElectronic(item) {
     if (item.library) {
-        console.log('item has library and is electronic', item.library.search(virtualRegex) !== -1);
         return item.library.search(virtualRegex) !== -1;
     } else {
-        console.log('item has NO library', item);
         return false;
     }
 }
 
 
 function getStandardKey(key) {
-    if (key.search(/branch/i) !== -1) { return 'library'; }
+    if (key.search(/(branch|library)/i) !== -1) { return 'library'; }
     else if (key.search(/callnumber/i) !== -1) { return 'callnumber'; }
     else if (key.search(/title/i) !== -1) { return 'title'; }
     else if (key.search(/due/i) !== -1) { return 'due'; }
     else if (key.search(/renewals/i) !== -1) { return 'renewals'; }
-    else { return key; }
+    else if (key.search(/position/i) !== -1) { return 'position'; }
+    else if (key.search(/holds(active|held|misc|pendingshipped)/i) !== -1) { return 'holdstatus'; }
+    else { return key.toLocaleLowerCase(); }
 }
 
 function checkCard(cardNumber) {
@@ -105,6 +104,18 @@ function checkCard(cardNumber) {
             function(cb) {
                 request.get(
                     {
+                        url: 'https://catalog.slcolibrary.org/polaris/patronaccount/components/ajaxPatronDataCloudLibrary3M.aspx?SetLoaded=true',
+                        jar: jar
+                    },
+                    function() { //err, httpResponse, body) {
+                        // TODO log httpResponse, body?
+                        cb(null);
+                    }
+                );
+            },
+            function(cb) {
+                request.get(
+                    {
                         url: 'https://catalog.slcolibrary.org/polaris/patronaccount/requests.aspx',
                         jar: jar
                     },
@@ -114,18 +125,34 @@ function checkCard(cardNumber) {
                 );
             },
             function(patronHolds, cb) {
+                // TODO - determine date the hold expires
+                // have seen - 'until today', 'yesterday', '2 days ago', 'since 9/10/2016', 'on 10/15/2016'
                 var $ = cheerio.load(patronHolds);
-                var items = $('#GridView1').find($('tr.patrongrid-row'));
+                var items = $('#GridView1').find($('tr[class*=patrongrid-]'));
                 items.each(function() {
                     var holdItem = {};
-                    $(this).find($('span[id^="GridView"]')).each(function() {
+                    $(this).find($('span[id^=GridView]')).each(function() {
                         holdItem[getStandardKey($(this).attr('id'))] = $(this).text();
                     });
                     $(this).find($('a.requestdetailview')).each(function() {//(idx, a) {
-                        holdItem.reqID = $(this).attr('href').split('ReqID=')[1].match(/\d+/)[0];
+                        var href = $(this).attr('href');
+                        if (href) {
+                            var qs = href.split('?');
+                            if (qs[1]) {
+                                qs[1].split('&').forEach(function(kv) {
+                                    var keyval = kv.split('=');
+                                    if (keyval[0].search(/(obj|req)id/i) !== -1) {
+                                        holdItem.reqID = keyval[1];
+                                    }
+                                });
+                            }
+                        }
+                    });
+                    $(this).find($('span[class*=Holds]')).each(function() {
+                        holdItem[getStandardKey($(this).attr('class'))] = $(this).text();
                     });
                     // add library card number to holdItem
-                    holdItem.patronCardNumber = cardNumber;
+                    holdItem.cardNumber = cardNumber;
                     holdItem.hold = true;
                     patronItems.push(holdItem);
                 });
@@ -144,7 +171,7 @@ function checkCard(cardNumber) {
             },
             function(patronItemPage, cb) {
                 var $ = cheerio.load(patronItemPage);
-                var items = $('#GridView1').find($('tr.patrongrid-row'));
+                var items = $('#GridView1').find($('tr[class*=patrongrid-]'));
                 items.each(function() {
                     var coItem = {};
                     $(this).find($('span[id^="GridView"]')).each(function() {
@@ -154,7 +181,7 @@ function checkCard(cardNumber) {
                         coItem.recID = $(this).attr('href').split('RecID=')[1].match(/\d+/)[0];
                     });
                     // add library card number to coItem
-                    coItem.patronCardNumber = cardNumber;
+                    coItem.cardNumber = cardNumber;
                     patronItems.push(coItem);
                 });
                 cb(null);
@@ -191,17 +218,23 @@ lineReader.on('close', function() {
             [].concat.apply([], results)
 
             .map(function(item) {
-                // TODO: add the card number to the data logged
+
+                item.created = new Date();
+                item.isElectronic = itemIsElectronic(item);
+                item.isDue = bookIsDue(item.due) && ! itemIsElectronic(item)
+
                 if (item.due) {
-                    itemModel.create({
+                    item.dueDate =  new Date(Date.parse(item.due));
+                    itemModel.create(/*{
                             'recID': item.recID,
                             'title': item.title,
-                            'dueDate': Date.parse(item.due),
+                            'dueDate': new Date(Date.parse(item.due)),
                             'isDue': bookIsDue(item.due) && ! itemIsElectronic(item),
                             'library': item.library,
                             'card': item.patronCardNumber,
                             'created': new Date()
-                        },
+                            }*/
+                        item,
                         function(err, savedData) {
                             if (err) {
                                 console.log('err: ' + err);
@@ -213,16 +246,15 @@ lineReader.on('close', function() {
                 }
 
                 if (item.hold) {
-                    holdsModel.create({
+                    holdsModel.create(/*{
                             'reqID': item.reqID,
                             'title': item.title,
-                            /*
-                            'dueDate': Date.parse(item.due),
-                            'isDue': bookIsDue(item.due),
-                            */
+                            //'dueDate': Date.parse(item.due),
+                            //'isDue': bookIsDue(item.due),
                             'card': item.patronCardNumber,
                             'created': new Date()
-                        },
+                            }*/
+                        item,
                         function(err, savedData) {
                             if (err) {
                                 console.log('err: ' + err);
