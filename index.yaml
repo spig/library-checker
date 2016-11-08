@@ -1,0 +1,9 @@
+- kind: Item
+  ancestor: yes
+  properties:
+      - name: recordID
+
+- kind: Item
+  ancestor: yes
+  properties:
+      - name: recordDate
