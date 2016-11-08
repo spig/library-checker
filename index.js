@@ -24,16 +24,17 @@ var holdModel = require('./holds-model-datastore');
 
 var virtualRegex = /(virtual|online)/i;
 
+var today = (new Date()).setHours(0,0,0,0);// set to beginning of today
+
 Date.prototype.addDays = function(days) {
     var date = new Date(this.valueOf());
-    date.setDate(date.getDate() + days);
-    return date;
+    date.setDate(date.getDate() + Number.parseInt(days, 10));
+    return new Date(date.setHours(0,0,0,0));
 };
 
 function bookIsDue(dueDate) {
     try {
         var due = Date.parse(dueDate);
-        var today = (new Date()).setHours(0,0,0,0);// set to beginning of today
         return (new Date(due - today)).getDate() <= DUE_WARNING_DAYS;
     } catch (ex) {
         console.log(ex);
@@ -209,6 +210,7 @@ lineReader.on('line', function (line) {
 });
 
 function parseRecordDate(recordDate) {
+    var daysMatch = recordDate.match(/\d+/);
     if (recordDate.search(/since|on|as of/i) !== -1) {
         var dateMatch = recordDate.match(/\d+\/\d+\/\d+/);
         if (dateMatch.length > 0) {
@@ -218,26 +220,42 @@ function parseRecordDate(recordDate) {
         }
     }
     if (recordDate.search(/days ago/i) !== -1) {
-        // TODO - return the number of days ago
-        return new Date();
+        if (daysMatch.length > 0) {
+            return (new Date()).addDays(-1 * daysMatch[0]);
+        } else {
+            return new Date();
+        }
     }
     if (recordDate.search(/more days/i) !== -1) {
         // TODO - return the number left
-        return new Date();
+        if (daysMatch.length > 0) {
+            return (new Date()).addDays(daysMatch[0]);
+        } else {
+            return new Date();
+        }
     }
     if (recordDate.search(/yesterday/i) !== -1) {
-        // TODO - return yesterday as date
-        return new Date();
+        return (new Date()).addDays(-1);
     }
     if (recordDate.search(/today/i) !== -1) {
         return new Date();
     }
     if (recordDate.search(/^\d+\/\d+\/\d+$/) === -1) {
         console.log('unhandled recordDate value: ' + recordDate);
-        return new Date();
+        // attempt to handle as a day value
+        if (daysMatch.length > 0) {
+            return (new Date()).addDays(daysMatch[0]);
+        } else {
+            return new Date();
+        }
     }
-    var rd = new Date(Date.parse(recordDate));
-    return rd;
+
+    var parsedDate = Date.parse(recordDate);
+    if (Number.isNaN(parsedDate)) {
+        return new Date();
+    } else {
+        return new Date(Date.parse(recordDate));
+    }
 }
 
 lineReader.on('close', function() {
@@ -265,11 +283,17 @@ lineReader.on('close', function() {
 
                 item.created = new Date();
                 item.isElectronic = itemIsElectronic(item);
+
+                item.recordDate = parseRecordDate(item.recordDate);
+
                 // TODO - drop isDue when we have the system in place to check items based on a users preferences
-                item.isDue = bookIsDue(item.due) && ! itemIsElectronic(item);
+                if (item.type === 'hold') {
+                    item.isDue = today < item.recordDate;
+                } else if (item.type === 'checkout') {
+                    item.isDue = bookIsDue(item.due) && ! itemIsElectronic(item);
+                }
                 // TODO - get all existing items and only update those that have changed
                 // TODO - remove all items that no longer exist on patron record
-                item.recordDate = parseRecordDate(item.recordDate);
                 // TODO - query the dataset for all items given a card number,
                 // filter those that match recordID, cardNumber and recordDate,
                 // removing everything else for that card number,
@@ -294,7 +318,6 @@ lineReader.on('close', function() {
                             console.log('savedData: ' + JSON.stringify(savedData));
                         }
                     );
-                    console.log('model created: ' + item.recordID);
                     return item;
             });
         /*
