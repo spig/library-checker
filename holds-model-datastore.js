@@ -23,6 +23,8 @@ var ds = Datastore({
 var kind = 'Item';
 // [END config]
 
+var ancestorKey = ds.key(['PatronItem', 'hold']);
+
 // Translates from Datastore's entity format to
 // the format expected by the application.
 //
@@ -40,8 +42,9 @@ var kind = 'Item';
 //     property: value
 //   }
 function fromDatastore (obj) {
-  obj.data.id = obj.key.id;
-  return obj.data;
+//  obj.data.id = obj.key.id;
+//  return obj.data;
+    return obj;
 }
 
 // Translates from the application's format to the datastore's
@@ -89,7 +92,8 @@ function toDatastore (obj, nonIndexed) {
 // pages. The callback is invoked with ``(err, books, nextPageToken)``.
 // [START list]
 function list (limit, token, cb) {
-  var q = ds.createQuery(['PatronItem', 'hold', kind])
+  var q = ds.createQuery([kind])
+    .hasAncestor(ancestorKey)
     .limit(limit)
     .order('title')
     .start(token);
@@ -103,6 +107,26 @@ function list (limit, token, cb) {
   });
 }
 // [END list]
+
+// [START getItem]
+function getItem(recordID, recordDate, cb) {
+    var q = ds.createQuery([kind])
+        .hasAncestor(ancestorKey)
+        .filter('recordID', '=', recordID)
+        .filter('recordDate', '=', recordDate);
+
+    ds.runQuery(q, function (err, entities, nextQuery) {
+        if (err) {
+            return cb(err);
+        }
+        if (nextQuery.moreResults !== Datastore.NO_MORE_RESULTS || entities.length > 1) {
+            console.log('Error: Found ' + entities.length + ' holds matching:', recordID, ', ', recordDate);
+            return cb('More than one record matched');
+        }
+        cb(null, entities.length);
+    });
+}
+// [END getItem]
 
 // Creates a new book or updates an existing book with new data. The provided
 // data is automatically translated into Datastore format. The book will be
@@ -160,6 +184,7 @@ module.exports = {
   read: read,
   update: update,
   delete: _delete,
-  list: list
+  list: list,
+  getItem: getItem
 };
 // [END exports]

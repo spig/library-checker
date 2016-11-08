@@ -56,8 +56,7 @@ function getStandardKey(key) {
     if (key.search(/(branch|library)/i) !== -1) { return 'library'; }
     else if (key.search(/title/i) !== -1) { return 'title'; }
     else if (key.search(/due|holdsdate/i) !== -1) { return 'recordDate'; }
-    else if (key.search(/renewals/i) !== -1) { return 'renewals'; }
-    else if (key.search(/position/i) !== -1) { return 'position'; }
+    else if (key.search(/renewals|position/i) !== -1) { return 'renewalsOrPosition'; }
     else if (key.search(/callnumber|author/i) !== -1) { return 'callnumberAuthor'; }
     else if (key.search(/holds(active|held|misc|pendingshipped)/i) !== -1) { return 'holdstatus'; }
     else { return key.toLocaleLowerCase(); }
@@ -308,16 +307,26 @@ lineReader.on('close', function() {
                     var model = itemModel;
                     if (item.type === 'hold') { model = holdModel; }
 
-                    model.create(
-                        item,
-                        function(err, savedData) {
-                            if (err) {
-                                console.log('err: ' + err);
-                            }
+                    model.getItem(item.recordID, item.recordDate, function(err, itemCount) {
+                        if (err) { return console.log('error: ' + err); }
 
-                            console.log('savedData: ' + JSON.stringify(savedData));
+                        if (itemCount > 0) {
+                            console.log('item already exists - skipping insert', item.type);
+                        } else {
+                            console.log('saving data...');
+                            model.create(
+                                item,
+                                function(err, savedData) {
+                                    if (err) {
+                                        console.log('err: ' + err);
+                                    }
+
+                                    console.log('savedData: ' + JSON.stringify(savedData));
+                                }
+                            );
                         }
-                    );
+                    });
+
                     return item;
             });
         /*
