@@ -17,8 +17,10 @@ function getModel () {
 }
 */
 
-var itemModel = require('./item-model-datastore');//getModel();
-var holdsModel = require('./holds-model-datastore');
+/*var itemModel = require('./item-model-datastore');//getModel();
+var holdsModel = require('./holds-model-datastore');*/
+var itemModel = require('./item-model-datastore');
+var holdModel = require('./holds-model-datastore');
 
 var virtualRegex = /(virtual|online)/i;
 
@@ -51,11 +53,11 @@ function itemIsElectronic(item) {
 
 function getStandardKey(key) {
     if (key.search(/(branch|library)/i) !== -1) { return 'library'; }
-    else if (key.search(/callnumber/i) !== -1) { return 'callnumber'; }
     else if (key.search(/title/i) !== -1) { return 'title'; }
-    else if (key.search(/due/i) !== -1) { return 'due'; }
+    else if (key.search(/due|holdsdate/i) !== -1) { return 'recordDate'; }
     else if (key.search(/renewals/i) !== -1) { return 'renewals'; }
     else if (key.search(/position/i) !== -1) { return 'position'; }
+    else if (key.search(/callnumber|author/i) !== -1) { return 'callnumberAuthor'; }
     else if (key.search(/holds(active|held|misc|pendingshipped)/i) !== -1) { return 'holdstatus'; }
     else { return key.toLocaleLowerCase(); }
 }
@@ -142,7 +144,7 @@ function checkCard(cardNumber) {
                                 qs[1].split('&').forEach(function(kv) {
                                     var keyval = kv.split('=');
                                     if (keyval[0].search(/(obj|req)id/i) !== -1) {
-                                        holdItem.reqID = keyval[1];
+                                        holdItem.recordID = keyval[1];
                                     }
                                 });
                             }
@@ -151,9 +153,8 @@ function checkCard(cardNumber) {
                     $(this).find($('span[class*=Holds]')).each(function() {
                         holdItem[getStandardKey($(this).attr('class'))] = $(this).text();
                     });
-                    // add library card number to holdItem
+                    holdItem.type = 'hold';
                     holdItem.cardNumber = cardNumber;
-                    holdItem.hold = true;
                     patronItems.push(holdItem);
                 });
                 cb(null);
@@ -178,9 +179,10 @@ function checkCard(cardNumber) {
                         coItem[getStandardKey($(this).attr('id'))] = $(this).text();
                     });
                     $(this).find($('a.itemdetailview')).each(function() { // (idx, a) {
-                        coItem.recID = $(this).attr('href').split('RecID=')[1].match(/\d+/)[0];
+                        coItem.recordID = $(this).attr('href').split('RecID=')[1].match(/\d+/)[0];
                     });
                     // add library card number to coItem
+                    coItem.type = 'checkout';
                     coItem.cardNumber = cardNumber;
                     patronItems.push(coItem);
                 });
@@ -206,6 +208,38 @@ lineReader.on('line', function (line) {
     cardCheckFunctions.push(checkCard(line));
 });
 
+function parseRecordDate(recordDate) {
+    if (recordDate.search(/since|on|as of/i) !== -1) {
+        var dateMatch = recordDate.match(/\d+\/\d+\/\d+/);
+        if (dateMatch.length > 0) {
+            return new Date(Date.parse(dateMatch[0]));
+        } else {
+            return new Date();
+        }
+    }
+    if (recordDate.search(/days ago/i) !== -1) {
+        // TODO - return the number of days ago
+        return new Date();
+    }
+    if (recordDate.search(/more days/i) !== -1) {
+        // TODO - return the number left
+        return new Date();
+    }
+    if (recordDate.search(/yesterday/i) !== -1) {
+        // TODO - return yesterday as date
+        return new Date();
+    }
+    if (recordDate.search(/today/i) !== -1) {
+        return new Date();
+    }
+    if (recordDate.search(/^\d+\/\d+\/\d+$/) === -1) {
+        console.log('unhandled recordDate value: ' + recordDate);
+        return new Date();
+    }
+    var rd = new Date(Date.parse(recordDate));
+    return rd;
+}
+
 lineReader.on('close', function() {
     async.parallel(
         cardCheckFunctions,
@@ -217,23 +251,40 @@ lineReader.on('close', function() {
             // flatten array of results
             [].concat.apply([], results)
 
+            .filter(function(item) {
+                // remove cancelled holds from list
+                if (item.holdstatus && item.holdstatus.search(/cancelled/i) !== -1) { return false; }
+                return true;
+            })
+
+            // return functions that can be run in parallel
             .map(function(item) {
+
+                // remove holdstatus
+                delete item.holdstatus;
 
                 item.created = new Date();
                 item.isElectronic = itemIsElectronic(item);
-                item.isDue = bookIsDue(item.due) && ! itemIsElectronic(item)
+                // TODO - drop isDue when we have the system in place to check items based on a users preferences
+                item.isDue = bookIsDue(item.due) && ! itemIsElectronic(item);
+                // TODO - get all existing items and only update those that have changed
+                // TODO - remove all items that no longer exist on patron record
+                item.recordDate = parseRecordDate(item.recordDate);
+                // TODO - query the dataset for all items given a card number,
+                // filter those that match recordID, cardNumber and recordDate,
+                // removing everything else for that card number,
+                // add those that are missing
+                // leaving the rest in place to avoid writing the same data
+                // query items by recordID, recordDate);
 
-                if (item.due) {
-                    item.dueDate =  new Date(Date.parse(item.due));
-                    itemModel.create(/*{
-                            'recID': item.recID,
-                            'title': item.title,
-                            'dueDate': new Date(Date.parse(item.due)),
-                            'isDue': bookIsDue(item.due) && ! itemIsElectronic(item),
-                            'library': item.library,
-                            'card': item.patronCardNumber,
-                            'created': new Date()
-                            }*/
+                        // TODO see if this item already exists in the datastore
+                    // TODO - handle itemModel and holdsModel
+                    // item.type = 'checkout' or 'hold'
+                        //holdsModel.getItem
+                    var model = itemModel;
+                    if (item.type === 'hold') { model = holdModel; }
+
+                    model.create(
                         item,
                         function(err, savedData) {
                             if (err) {
@@ -243,31 +294,10 @@ lineReader.on('close', function() {
                             console.log('savedData: ' + JSON.stringify(savedData));
                         }
                     );
-                }
-
-                if (item.hold) {
-                    holdsModel.create(/*{
-                            'reqID': item.reqID,
-                            'title': item.title,
-                            //'dueDate': Date.parse(item.due),
-                            //'isDue': bookIsDue(item.due),
-                            'card': item.patronCardNumber,
-                            'created': new Date()
-                            }*/
-                        item,
-                        function(err, savedData) {
-                            if (err) {
-                                console.log('err: ' + err);
-                            }
-
-                            console.log('savedData: ' + JSON.stringify(savedData));
-                        }
-                    );
-                }
-
-                return item;
-            })
-
+                    console.log('model created: ' + item.recordID);
+                    return item;
+            });
+        /*
             // remove items that are from Virtual Library - can't be late
             .filter(function (item) {
                 if (item.library) {
@@ -287,6 +317,7 @@ lineReader.on('close', function() {
             .map(function(item) {
                 console.log(item.title + ' is due ' + item.due);
             });
+            */
 
             // TODO: filter out items that are due
             // TODO: idea - log all items checked out to a database, write another script to query database for those that are coming due, write another script to do auto-renewals
