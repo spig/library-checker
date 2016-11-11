@@ -11,16 +11,7 @@ var pin = process.argv[3];
 
 var DUE_WARNING_DAYS = 2;
 
-/*
-function getModel () {
-  return require('./model-' + config.get('DATA_BACKEND'));
-}
-*/
-
-/*var itemModel = require('./item-model-datastore');//getModel();
-var holdsModel = require('./holds-model-datastore');*/
-var itemModel = require('./item-model-datastore');
-var holdModel = require('./holds-model-datastore');
+var model = require('./model-datastore');
 
 var virtualRegex = /(virtual|online)/i;
 
@@ -239,10 +230,13 @@ function parseRecordDate(recordDate) {
     if (recordDate.search(/today/i) !== -1) {
         return new Date();
     }
+    if (recordDate.search(/tomorrow/i) !== -1) {
+        return (new Date()).addDays(1);  // today + 1 day = tomorrow
+    }
     if (recordDate.search(/^\d+\/\d+\/\d+$/) === -1) {
         console.log('unhandled recordDate value: ' + recordDate);
         // attempt to handle as a day value
-        if (daysMatch.length > 0) {
+        if (daysMatch && daysMatch.length > 0) {
             return (new Date()).addDays(daysMatch[0]);
         } else {
             return new Date();
@@ -257,78 +251,121 @@ function parseRecordDate(recordDate) {
     }
 }
 
-lineReader.on('close', function() {
-    async.parallel(
-        cardCheckFunctions,
-        function(err, results) {
-            if (err) {
-                return console.log('error: ' + err);
+function itemCheckFunctions(items) {
+    return items.map(
+        function(item) {
+            if (item.holdstatus && item.holdstatus.search(/cancelled/i) !== -1) {
+                return;
             }
 
-            // flatten array of results
-            [].concat.apply([], results)
+           return function(callback) {
+               // remove holdstatus
+               delete item.holdstatus;
 
-            .filter(function(item) {
-                // remove cancelled holds from list
-                if (item.holdstatus && item.holdstatus.search(/cancelled/i) !== -1) { return false; }
-                return true;
-            })
+               item.created = new Date();
+               item.isElectronic = itemIsElectronic(item);
 
-            // return functions that can be run in parallel
-            .map(function(item) {
+               item.recordDate = parseRecordDate(item.recordDate);
 
-                // remove holdstatus
-                delete item.holdstatus;
+               // TODO - drop isDue when we have the system in place to check items based on a users preferences
+               if (item.type === 'hold') {
+                   item.isDue = today < item.recordDate;
+               } else if (item.type === 'checkout') {
+                   item.isDue = bookIsDue(item.due) && ! itemIsElectronic(item);
+               }
+               // TODO - get all existing items and only update those that have changed
+               // TODO - remove all items that no longer exist on patron record
+               // TODO - query the dataset for all items given a card number,
+               // filter those that match recordID, cardNumber and recordDate,
+               // removing everything else for that card number,
+               // add those that are missing
+               // leaving the rest in place to avoid writing the same data
+               // query items by recordID, recordDate);
 
-                item.created = new Date();
-                item.isElectronic = itemIsElectronic(item);
 
-                item.recordDate = parseRecordDate(item.recordDate);
+               // see if this item already exists in the datastore
+               model.getItem(item.recordID, item.recordDate, function(err, dbItems) {
+                   if (err) { return console.log('error: ' + err); }
 
-                // TODO - drop isDue when we have the system in place to check items based on a users preferences
-                if (item.type === 'hold') {
-                    item.isDue = today < item.recordDate;
-                } else if (item.type === 'checkout') {
-                    item.isDue = bookIsDue(item.due) && ! itemIsElectronic(item);
-                }
-                // TODO - get all existing items and only update those that have changed
-                // TODO - remove all items that no longer exist on patron record
-                // TODO - query the dataset for all items given a card number,
-                // filter those that match recordID, cardNumber and recordDate,
-                // removing everything else for that card number,
-                // add those that are missing
-                // leaving the rest in place to avoid writing the same data
-                // query items by recordID, recordDate);
+                   var dbItem = dbItems[0];
+                   //dbItemsFound.push(dbItem);
 
-                        // TODO see if this item already exists in the datastore
-                    // TODO - handle itemModel and holdsModel
-                    // item.type = 'checkout' or 'hold'
-                        //holdsModel.getItem
-                    var model = itemModel;
-                    if (item.type === 'hold') { model = holdModel; }
+                   if (dbItems.length > 0) {
+                       if (dbItems.length === 1 && item.recordDate.valueOf() !== dbItem.recordDate.valueOf()) {
+                           console.log('item has new recordDate', item.recordDate.valueOf(), dbItem.recordDate.valueOf());
+                           //console.log(JSON.stringify(dbItem));
+                           // update item
+                           // set the item id to the dbItem's id
+                           item.id = dbItem.id;
+                           model.update (dbItem.id, item, function(err, savedData) {
+                               if (err) {
+                                   return callback(err);
+                               }
+                               console.log('savedData:', savedData);
+                           });
+                       } else {
+                           console.log('item exists and is unchanged - skipping insert', item.type);
+                       }
+                   } else {
+                       console.log('saving data...');
+                       model.create(
+                           item,
+                           function(err, savedData) {
+                               if (err) {
+                                   return callback(err);
+                               }
 
-                    model.getItem(item.recordID, item.recordDate, function(err, itemCount) {
-                        if (err) { return console.log('error: ' + err); }
+                               //console.log('savedData: ' + JSON.stringify(savedData));
+                           }
+                       );
+                   }
+                   callback(null, item);
+               }); // end model.getItem
+           };
+        });
+}
 
-                        if (itemCount > 0) {
-                            console.log('item already exists - skipping insert', item.type);
-                        } else {
-                            console.log('saving data...');
-                            model.create(
-                                item,
-                                function(err, savedData) {
-                                    if (err) {
-                                        console.log('err: ' + err);
-                                    }
-
-                                    console.log('savedData: ' + JSON.stringify(savedData));
-                                }
-                            );
+lineReader.on('close', function() {
+    // TODO - find a way to delete items we didn't see during this check of the library cards
+    // maybe wrap this in a waterfall so once we retrieve all items
+    // checked out, we then see which ones are no longer in the database
+    // and remove them
+//    var dbItemsFound = [];
+    waterfall(
+        [
+            function (cb) {
+                async.parallel(
+                    cardCheckFunctions,
+                    function (err, results) {
+                        if (err) {
+                            return console.log('error: ' + err);
                         }
-                    });
 
-                    return item;
-            });
+                        // flatten array of results
+                        results = [].concat.apply([], results);
+
+                        async.parallel(
+                            itemCheckFunctions(results),
+                            function (err, results) {
+                                if (err) { return cb(err); }
+
+                                console.log('done with itemCheckFunctions');
+                                return cb(null);
+                            }
+                        );
+                    }
+                );
+            }
+        ], function (err) {
+            if (err) {
+                console.log(err);
+            } else {
+                console.log('library check complete');
+            }
+        }
+    );
+});
+
         /*
             // remove items that are from Virtual Library - can't be late
             .filter(function (item) {
@@ -354,6 +391,3 @@ lineReader.on('close', function() {
             // TODO: filter out items that are due
             // TODO: idea - log all items checked out to a database, write another script to query database for those that are coming due, write another script to do auto-renewals
             // TODO: script to check for items that are available
-        }
-    );
-});
